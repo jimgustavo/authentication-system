@@ -1,0 +1,30 @@
+<!-- static/signup.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Signup</title>
+</head>
+<body>
+    <h1>Signup</h1>
+    <!-- Signup form -->
+    <form id="signup-form">
+        <label for="email">Email:</label><br>
+        <input type="email" id="email" name="email" required><br>
+        <label for="password">Password:</label><br>
+        <input type="password" id="password" name="password" required><br>
+        <button type="button" id="togglePassword">Show Password</button> <!-- Add button to toggle password visibility -->
+        <label for="roles">Roles:</label><br>
+        <input type="text" id="roles" name="roles" value="user" readonly><br> <!-- Default to "user" role -->
+        <button type="submit">Signup</button>
+    </form>
+    <!-- Message for login -->
+    <p>Already have an account? <a href="/static/login.html">Click here to login</a>.</p>
+    <div id="signup-error" style="display: none; color: red;">
+        Email already exists. Please use a different email.
+    </div>    
+    <script src="script.js"></script>
+</body>
+</html>
+

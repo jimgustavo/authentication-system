@@ -3,42 +3,40 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
-	"strconv"
+	"strings"
+	"time"
 
-	_ "github.com/lib/pq"
+	"golang.org/x/crypto/bcrypt"
 
+	"github.com/dgrijalva/jwt-go"
 	"github.com/gorilla/mux"
+	_ "github.com/lib/pq"
 )
 
-type AutoPart struct {
-	ID            int     `json:"id"`
-	Name          string  `json:"name"`
-	Category      string  `json:"category"`
-	Make          string  `json:"make"`
-	Models        string  `json:"models"`
-	Description   string  `json:"description"`
-	PurchasePrice float64 `json:"purchase_price"`
-	SalePrice     float64 `json:"sale_price"`
-	Photo         string  `json:"photo"`
-	Stock         int     `json:"stock"`
+type User struct {
+	ID        int       `json:"id"`
+	Email     string    `json:"email"`
+	Password  string    `json:"password"`
+	CreatedAt time.Time `json:"created_at"`
+	Roles     []string  `json:"roles"`
+}
+type Claims struct {
+	Email string `json:"email"`
+	jwt.StandardClaims
 }
 
-var (
-	db        *sql.DB
-	autoParts []AutoPart
-)
+var db *sql.DB
 
 func init() {
-	// Initialize the database connection in an init function
 	var err error
-	db, err = sql.Open("postgres", "postgres://tavito:mamacita@localhost:5432/autoparts?sslmode=disable")
+	db, err = sql.Open("postgres", "postgres://tavito:mamacita@localhost:5432/authentication?sslmode=disable")
 	if err != nil {
 		log.Fatal("Failed to connect to the database:", err)
 	}
 
-	// Check the database connection
 	if err = db.Ping(); err != nil {
 		log.Fatal("Failed to ping the database:", err)
 	}
@@ -52,305 +50,395 @@ func main() {
 	// Serve static files from the "static" directory
 	router.PathPrefix("/static/").Handler(http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 
-	router.HandleFunc("/autoparts", GetAutoParts).Methods("GET")
-	router.HandleFunc("/autoparts/{id}", GetAutoPart).Methods("GET")
-	router.HandleFunc("/filter", FilterAutoParts).Methods("GET")
-	router.HandleFunc("/autoparts", CreateAutoPart).Methods("POST")
-	router.HandleFunc("/autoparts/{id}", UpdateAutoPart).Methods("PUT")
-	router.HandleFunc("/autoparts/{id}", DeleteAutoPart).Methods("DELETE")
-	http.ListenAndServe(":8080", router)
+	router.HandleFunc("/signup", SignupHandler).Methods("POST")
+	router.HandleFunc("/login", LoginHandler).Methods("POST")
+	router.HandleFunc("/profile", UserProfileHandler).Methods("GET")
+	router.HandleFunc("/static/user_profile", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "user_profile.html")
+	}).Methods("GET")
+	router.HandleFunc("/users", UsersListHandler).Methods("GET")
+	router.HandleFunc("/reset_password/{email}", ResetPasswordHandler).Methods("PUT")
+	router.HandleFunc("/delete/{id}", DeleteUserHandler).Methods("DELETE")
+	//router.HandleFunc("/assign-admin-role/{id}", AssignAdminRoleHandler).Methods("POST")
+
+	log.Println("Server running on port 8080...")
+	log.Fatal(http.ListenAndServe(":8080", router))
 }
 
-func GetAutoParts(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
+func SignupHandler(w http.ResponseWriter, r *http.Request) {
+	//PROCESS:
+	// Parse request body
+	// Validate input
+	// Hash password
+	// Check for duplicate emails
+	// Insert user into database
+	// Return appropriate response
 
-	// Execute a SELECT query to retrieve all auto parts from the database
-	rows, err := db.Query("SELECT * FROM autoparts")
+	// Parse request body
+	var user User
+	err := json.NewDecoder(r.Body).Decode(&user)
 	if err != nil {
-		http.Error(w, "Failed to retrieve data from the database", http.StatusInternalServerError)
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Validate input
+	if user.Email == "" || user.Password == "" {
+		http.Error(w, "Email and password are required", http.StatusBadRequest)
+		return
+	}
+
+	// Hash password
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
+	if err != nil {
+		http.Error(w, "Failed to hash password", http.StatusInternalServerError)
+		return
+	}
+	user.Password = string(hashedPassword)
+
+	// Check for duplicate emails
+	var count int
+	err = db.QueryRow("SELECT COUNT(*) FROM users WHERE email = $1", user.Email).Scan(&count)
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	if count > 0 {
+		http.Error(w, "Email already exists", http.StatusConflict)
+		return
+	}
+
+	// Insert user into database
+	createdAt := time.Now()
+	err = db.QueryRow("INSERT INTO users (email, password, created_at) VALUES ($1, $2, $3) RETURNING id", user.Email, user.Password, createdAt).Scan(&user.ID)
+	if err != nil {
+		http.Error(w, "Failed to insert user into database", http.StatusInternalServerError)
+		return
+	}
+	user.CreatedAt = createdAt
+
+	// Return appropriate response
+	user.Password = "" // Remove password from response
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(user)
+}
+
+func LoginHandler(w http.ResponseWriter, r *http.Request) {
+	//PROCESS:
+	// Parse request body
+	// Authenticate user
+	// If authentication succeeds, generate JWT
+	// Return appropriate response
+
+	// Parse request body
+	var user User
+	err := json.NewDecoder(r.Body).Decode(&user)
+	if err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Authenticate user
+	authenticated, err := authenticateUser(user.Email, user.Password)
+	if err != nil {
+		http.Error(w, "Failed to authenticate user", http.StatusUnauthorized)
+		return
+	}
+	if !authenticated {
+		http.Error(w, "Invalid email or password", http.StatusUnauthorized)
+		return
+	}
+
+	// If authentication succeeds, generate JWT
+	token, err := generateJWT(user.Email)
+	if err != nil {
+		http.Error(w, "Failed to generate JWT", http.StatusInternalServerError)
+		return
+	}
+
+	// Return appropriate response
+	response := map[string]string{
+		"token": token,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func authenticateUser(email, password string) (bool, error) {
+	// Retrieve user from the database by email
+	var storedPassword string
+	err := db.QueryRow("SELECT password FROM users WHERE email = $1", email).Scan(&storedPassword)
+	if err != nil {
+		return false, err
+	}
+
+	// Compare the stored password with the provided password
+	err = bcrypt.CompareHashAndPassword([]byte(storedPassword), []byte(password))
+	if err != nil {
+		return false, nil
+	}
+
+	return true, nil
+}
+
+func generateJWT(email string) (string, error) {
+	// Create the JWT claims
+	claims := Claims{
+		Email: email,
+		StandardClaims: jwt.StandardClaims{
+			ExpiresAt: time.Now().Add(time.Hour * 24).Unix(), // Token expires in 24 hours
+		},
+	}
+
+	// Create the JWT token
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+
+	// Sign the token with the secret key
+	tokenString, err := token.SignedString([]byte("your-secret-key")) // Replace "your-secret-key" with your actual secret key
+	if err != nil {
+		return "", err
+	}
+	return tokenString, nil
+}
+
+func UserProfileHandler(w http.ResponseWriter, r *http.Request) {
+	// Parse Authentication Token
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		http.Error(w, "Authorization token missing", http.StatusUnauthorized)
+		return
+	}
+
+	// Extract token string without the "Bearer " prefix
+	tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+
+	// Verify Authentication Token
+	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
+		return []byte("your-secret-key"), nil // Replace "your-secret-key" with your actual secret key
+	})
+	if err != nil {
+		fmt.Println("Error parsing token:", err) // Print error for debugging
+		http.Error(w, "Failed to parse token", http.StatusUnauthorized)
+		return
+	}
+
+	claims, ok := token.Claims.(*Claims)
+	if !ok || !token.Valid {
+		http.Error(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	// Extract User Information
+	email := claims.Email
+
+	// Retrieve User Profile from Database
+	userProfile, err := getUserProfile(email)
+	if err != nil {
+		http.Error(w, "Failed to retrieve user profile", http.StatusInternalServerError)
+		return
+	}
+
+	// Fetch Data from External API
+	externalAPIURL := "http://localhost:3000/orders"
+	resp, err := http.Get(externalAPIURL)
+	if err != nil {
+		http.Error(w, "Failed to fetch data from external API", http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Parse JSON Response from External API
+	var orders []map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&orders); err != nil {
+		http.Error(w, "Failed to parse JSON response from external API", http.StatusInternalServerError)
+		return
+	}
+
+	// Response Formatting
+	response := map[string]interface{}{
+		"email":      userProfile.Email,
+		"created_at": userProfile.CreatedAt.Format(time.RFC3339), // Example formatting, adjust as needed
+		// Add other profile fields here
+		"orders": orders, // Include data from external API
+	}
+
+	// Send Response
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func getUserProfile(email string) (*User, error) {
+	query := "SELECT email, created_at FROM users WHERE email = $1"
+	row := db.QueryRow(query, email)
+	var userProfile User
+	err := row.Scan(&userProfile.Email, &userProfile.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &userProfile, nil
+}
+
+func UsersListHandler(w http.ResponseWriter, r *http.Request) {
+	// Query the database to fetch all users
+	rows, err := db.Query("SELECT id, email, created_at FROM users")
+	if err != nil {
+		http.Error(w, "Failed to retrieve users", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
 
-	// Create a slice to store the retrieved auto parts
-	var retrievedAutoParts []AutoPart
-
-	// Iterate through the result rows and scan them into AutoPart structs
+	// Iterate over the rows and store user information in a slice
+	var users []User
 	for rows.Next() {
-		var autoPart AutoPart
-		if err := rows.Scan(
-			&autoPart.ID,
-			&autoPart.Name,
-			&autoPart.Category,
-			&autoPart.Make,
-			&autoPart.Models,
-			&autoPart.Description,
-			&autoPart.PurchasePrice,
-			&autoPart.SalePrice,
-			&autoPart.Photo,
-			&autoPart.Stock,
-		); err != nil {
-			http.Error(w, "Failed to scan data from the database", http.StatusInternalServerError)
+		var user User
+		if err := rows.Scan(&user.ID, &user.Email, &user.CreatedAt); err != nil {
+			http.Error(w, "Failed to retrieve user information", http.StatusInternalServerError)
 			return
 		}
-		retrievedAutoParts = append(retrievedAutoParts, autoPart)
+		// Append user to the slice
+		users = append(users, user)
 	}
-
-	// Check for errors from iterating over rows
 	if err := rows.Err(); err != nil {
-		http.Error(w, "Error while iterating over database rows", http.StatusInternalServerError)
+		http.Error(w, "Failed to iterate over users", http.StatusInternalServerError)
 		return
 	}
 
-	// Encode and send the retrieved auto parts as JSON response
-	json.NewEncoder(w).Encode(retrievedAutoParts)
+	// Return the list of users as JSON response
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(users); err != nil {
+		http.Error(w, "Failed to encode users as JSON", http.StatusInternalServerError)
+		return
+	}
 }
 
-func GetAutoPart(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
+func ResetPasswordHandler(w http.ResponseWriter, r *http.Request) {
+	// Parse user email from the request URL
 	params := mux.Vars(r)
-	autoPartID, err := strconv.Atoi(params["id"])
+	email := params["email"]
+
+	// Parse request body
+	var updateRequest struct {
+		OldPassword string `json:"old_password"`
+		NewPassword string `json:"new_password"`
+	}
+	err := json.NewDecoder(r.Body).Decode(&updateRequest)
 	if err != nil {
-		http.Error(w, "Invalid ID", http.StatusBadRequest)
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 
-	// Execute a SELECT query to retrieve a specific auto part from the database
-	row := db.QueryRow("SELECT * FROM autoparts WHERE id = $1", autoPartID)
-
-	// Scan the result row's data into an AutoPart struct
-	var autoPart AutoPart
-	if err := row.Scan(
-		&autoPart.ID,
-		&autoPart.Name,
-		&autoPart.Category,
-		&autoPart.Make,
-		&autoPart.Models,
-		&autoPart.Description,
-		&autoPart.PurchasePrice,
-		&autoPart.SalePrice,
-		&autoPart.Photo,
-		&autoPart.Stock,
-	); err != nil {
-		if err == sql.ErrNoRows {
-			http.NotFound(w, r)
-		} else {
-			http.Error(w, "Failed to retrieve data from the database", http.StatusInternalServerError)
-		}
+	// Retrieve current user's password from the database
+	var storedPassword string
+	err = db.QueryRow("SELECT password FROM users WHERE email = $1", email).Scan(&storedPassword)
+	if err != nil {
+		http.Error(w, "Failed to retrieve user information", http.StatusInternalServerError)
 		return
 	}
 
-	// Encode and send the retrieved auto part as JSON response
-	json.NewEncoder(w).Encode(autoPart)
+	// Compare the stored password with the provided old password
+	err = bcrypt.CompareHashAndPassword([]byte(storedPassword), []byte(updateRequest.OldPassword))
+	if err != nil {
+		log.Println("Password comparison failed:", err)
+		http.Error(w, "Invalid old password", http.StatusUnauthorized)
+		return
+	}
+
+	// Hash the new password
+	hashedNewPassword, err := bcrypt.GenerateFromPassword([]byte(updateRequest.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		http.Error(w, "Failed to hash new password", http.StatusInternalServerError)
+		return
+	}
+
+	// Update user's password in the database
+	_, err = db.Exec("UPDATE users SET password = $1 WHERE email = $2", hashedNewPassword, email)
+	if err != nil {
+		http.Error(w, "Failed to update user password", http.StatusInternalServerError)
+		return
+	}
+
+	// Return success response with an empty JSON object
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("{}"))
 }
 
-func FilterAutoParts(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	// Parse query parameters
-	queryParams := r.URL.Query()
-
-	// Build the WHERE clause based on the query parameters
-	var whereClause string
-	var args []interface{}
-	var index int = 1
-	for key, values := range queryParams {
-		if len(values) == 0 {
-			continue
-		}
-
-		// Handle different query parameters accordingly
-		switch key {
-		case "category":
-			whereClause += " AND category = $" + strconv.Itoa(index)
-		case "make":
-			whereClause += " AND make = $" + strconv.Itoa(index)
-
-		case "models":
-			whereClause += " AND models = $" + strconv.Itoa(index)
-			// Add cases for other query parameters if needed
-		}
-
-		// Append query parameter value to args
-		args = append(args, values[0])
-		index++
-	}
-
-	// Construct the SQL query
-	query := "SELECT * FROM autoparts WHERE true" + whereClause
-
-	// Execute the SQL query
-	rows, err := db.Query(query, args...)
-	if err != nil {
-		http.Error(w, "Failed to retrieve data from the database", http.StatusInternalServerError)
-		return
-	}
-	defer rows.Close()
-
-	// Create a slice to store the retrieved auto parts
-	var retrievedAutoParts []AutoPart
-
-	// Iterate through the result rows and scan them into AutoPart structs
-	for rows.Next() {
-		var autoPart AutoPart
-		if err := rows.Scan(
-			&autoPart.ID,
-			&autoPart.Name,
-			&autoPart.Category,
-			&autoPart.Make,
-			&autoPart.Models,
-			&autoPart.Description,
-			&autoPart.PurchasePrice,
-			&autoPart.SalePrice,
-			&autoPart.Photo,
-			&autoPart.Stock,
-		); err != nil {
-			http.Error(w, "Failed to scan data from the database", http.StatusInternalServerError)
-			return
-		}
-		retrievedAutoParts = append(retrievedAutoParts, autoPart)
-	}
-
-	// Check for errors from iterating over rows
-	if err := rows.Err(); err != nil {
-		http.Error(w, "Error while iterating over database rows", http.StatusInternalServerError)
-		return
-	}
-
-	// Encode and send the retrieved auto parts as JSON response
-	json.NewEncoder(w).Encode(retrievedAutoParts)
-}
-
-func CreateAutoPart(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	var newAutoPart AutoPart
-	_ = json.NewDecoder(r.Body).Decode(&newAutoPart)
-
-	// Insert the newAutoPart data into the database
-	_, err := db.Exec(
-		"INSERT INTO autoparts (name, category, make, models, description, purchase_price, sale_price, photo, stock) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-		newAutoPart.Name, newAutoPart.Category, newAutoPart.Make, newAutoPart.Models, newAutoPart.Description,
-		newAutoPart.PurchasePrice, newAutoPart.SalePrice, newAutoPart.Photo, newAutoPart.Stock,
-	)
-	if err != nil {
-		http.Error(w, "Failed to insert data into the database", http.StatusInternalServerError)
-		return
-	}
-
-	// Append the newAutoPart to the local slice (optional, for in-memory storage)
-	autoParts = append(autoParts, newAutoPart)
-
-	json.NewEncoder(w).Encode(newAutoPart)
-}
-
-// UpdateAutoPart updates an auto part by ID
-func UpdateAutoPart(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
+func DeleteUserHandler(w http.ResponseWriter, r *http.Request) {
+	// Parse user ID from the request URL
 	params := mux.Vars(r)
-	autoPartID, err := strconv.Atoi(params["id"])
+	userID := params["id"]
+
+	// Delete user from the database
+	_, err := db.Exec("DELETE FROM users WHERE id = $1", userID)
 	if err != nil {
-		http.Error(w, "Invalid ID", http.StatusBadRequest)
+		http.Error(w, "Failed to delete user", http.StatusInternalServerError)
 		return
 	}
 
-	var updatedAutoPart AutoPart
-	if err := json.NewDecoder(r.Body).Decode(&updatedAutoPart); err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
-		return
-	}
-
-	// Execute an UPDATE query to update a specific auto part in the database
-	_, err = db.Exec(
-		"UPDATE autoparts SET name = $2, category = $3, make = $4, models = $5, description = $6, purchase_price = $7, sale_price = $8, photo = $9, stock = $10 WHERE id = $1",
-		autoPartID,
-		updatedAutoPart.Name,
-		updatedAutoPart.Category,
-		updatedAutoPart.Make,
-		updatedAutoPart.Models,
-		updatedAutoPart.Description,
-		updatedAutoPart.PurchasePrice,
-		updatedAutoPart.SalePrice,
-		updatedAutoPart.Photo,
-		updatedAutoPart.Stock,
-	)
-	if err != nil {
-		http.Error(w, "Failed to update data in the database", http.StatusInternalServerError)
-		return
-	}
-
-	// Set the ID of the updatedAutoPart to the provided autoPartID
-	updatedAutoPart.ID = autoPartID
-
-	// Encode and send the updated auto part as JSON response
-	json.NewEncoder(w).Encode(updatedAutoPart)
+	// Return success response
+	w.WriteHeader(http.StatusOK)
 }
 
-// DeleteAutoPart deletes an auto part by ID
-func DeleteAutoPart(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	params := mux.Vars(r)
-	autoPartID, err := strconv.Atoi(params["id"])
-	if err != nil {
-		http.Error(w, "Invalid ID", http.StatusBadRequest)
-		return
-	}
+func AssignAdminRoleHandler(w http.ResponseWriter, r *http.Request) {
 
-	// Execute a DELETE query to delete a specific auto part from the database
-	result, err := db.Exec("DELETE FROM autoparts WHERE id = $1", autoPartID)
-	if err != nil {
-		http.Error(w, "Failed to delete data from the database", http.StatusInternalServerError)
-		return
-	}
-
-	// Check the number of rows affected to determine if the auto part was found and deleted
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		http.Error(w, "Failed to get the number of rows affected", http.StatusInternalServerError)
-		return
-	}
-
-	if rowsAffected == 0 {
-		// If no rows were affected, the specified auto part ID was not found
-		http.NotFound(w, r)
-		return
-	}
-
-	// Respond with a success message
-	successMessage := map[string]string{"message": "Auto part deleted successfully"}
-	json.NewEncoder(w).Encode(successMessage)
 }
 
 /*
-/////////////////////CURL COMMANDS TO THE TEST THE ENDPOINTS//////////////////////////////
+/////////////////////CURL commands to test the endpoints////////////////////////
+Signup Endpoint (/signup):
+curl -X POST http://localhost:8080/signup \
+-H "Content-Type: application/json" \
+-d '{
+  "email": "test@example.com",
+  "password": "password123",
+  "roles": ["user"]
+}'
 
-curl -X POST -H "Content-Type: application/json" -d '{
-  "name": "Brake Pads",
-  "category": "Braking System",
-  "make": "Toyota",
-  "models": "hilux 2.7, fortuner 2.7",
-  "description": "High-performance brake pads for enhanced stopping power.",
-  "purchase_price": 25.0,
-  "sale_price": 50.0,
-  "photo": "https://example.com/brake_pads.jpg",
-  "stock": 100
-}' http://localhost:8080/autoparts
+Login Endpoint (/login):
+curl -X POST http://localhost:8080/login \
+-H "Content-Type: application/json" \
+-d '{
+  "email": "test@example.com",
+  "password": "password123"
+}'
+
+{"token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6InRlc3RAZXhhbXBsZS5jb20iLCJleHAiOjE3MTAzODUxNTl9.zk7qVQmQsxZNxA1JOZ_k5iyZlAvWqBpprR6H_jhkVFw"}
 
 
-curl -X PUT -H "Content-Type: application/json" -d '{
-    "name": "Updated Auto Part Name",
-    "category": "Updated Category",
-    "make": "Updated Make",
-    "models": "Updated Models",
-    "description": "Updated Description",
-    "purchase_price": 99.99,
-    "sale_price": 129.99,
-    "photo": "updated_photo.jpg",
-    "stock": 50
-}' http://localhost:8080/autoparts/{1}
+User Profile Endpoint (GET /profile):
+curl -X GET http://localhost:8080/profile \
+-H "Authorization: Bearer <your_jwt_token>"
+curl -X GET http://localhost:8080/profile \
+-H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6InRlc3RAZXhhbXBsZS5jb20iLCJleHAiOjE3MTAzODUxNTl9.zk7qVQmQsxZNxA1JOZ_k5iyZlAvWqBpprR6H_jhkVFw"
 
-curl -X DELETE http://localhost:8080/autoparts/{2}
 
-curl -X GET http://localhost:8080/autoparts -H "Origin: http://localhost:8080"
+Users List Endpoint (GET /users):
+curl -X GET http://localhost:8080/users
 
+
+Update User Endpoint (PUT /update):
+curl -X PUT -H "Content-Type: application/json" -d '{"old_password": "oldpassword", "new_password": "newpassword"}' http://localhost:8080/reset_password/<user_email_here>
+curl -X PUT -H "Content-Type: application/json" -d '{"old_password": "mamasota", "new_password": "mamacita"}' http://localhost:8080/reset_password/jimgustavo1987@gmail.com
+
+Delete User Endpoint (DELETE /delete):
+curl -X DELETE http://localhost:8080/delete/<user_id_here>
+
+Assign Admin Role Endpoint (POST /assign-admin-role):
+
+
+/////////////////////POSTGRES DATABASE CONFIGURATION////////////////////////
+# Init Postgres in bash
+psql
+# List databases
+\l
+# Create database
+CREATE DATABASE authentication;
+# Switch to orders database
+\c authentication
+# Check you path in UNIX bash
+pwd
+# Execute sql script
+\i /Users/tavito/Documents/go/authentication-system/authentication.sql
+# Delete database in case you need
+DROP DATABASE authentication;
 */

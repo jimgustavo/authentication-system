@@ -1,0 +1,72 @@
+<!-- static/users_list.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Users List</title>
+</head>
+<body>
+    <h2>Users List</h2>
+    <div id="usersList"></div>
+
+    <script>
+        // Function to fetch and display users
+        function fetchUsers() {
+            fetch('http://localhost:8080/users')
+                .then(response => response.json())
+                .then(users => {
+                    const usersList = document.getElementById('usersList');
+                    usersList.innerHTML = ''; // Clear previous content
+
+                    users.forEach(user => {
+                        const userContainer = document.createElement('div');
+                        userContainer.classList.add('user-container');
+
+                        const userEmail = document.createElement('span');
+                        userEmail.textContent = `Email: ${user.email}`;
+
+                        const deleteButton = document.createElement('button');
+                        deleteButton.textContent = 'Delete';
+                        deleteButton.addEventListener('click', () => deleteUser(user.id));
+
+                        const updateButton = document.createElement('button');
+                        updateButton.textContent = 'Update';
+                        updateButton.addEventListener('click', () => updateUser(user.id));
+
+                        userContainer.appendChild(userEmail);
+                        userContainer.appendChild(deleteButton);
+                        userContainer.appendChild(updateButton);
+
+                        usersList.appendChild(userContainer);
+                    });
+                })
+                .catch(error => console.error('Error fetching users:', error));
+        }
+
+        // Function to delete user
+        function deleteUser(userId) {
+            fetch(`http://localhost:8080/delete/${userId}`, {
+                method: 'DELETE'
+            })
+            .then(response => {
+                if (response.ok) {
+                    fetchUsers(); // Refresh the user list after deletion
+                } else {
+                    console.error('Failed to delete user');
+                }
+            })
+            .catch(error => console.error('Error deleting user:', error));
+        }
+
+        // Function to update user
+        function updateUser(userId) {
+            // Implement update user functionality as needed
+            console.log(`Update user with ID: ${userId}`);
+        }
+
+        // Fetch and display users on page load
+        fetchUsers();
+    </script>
+</body>
+</html>
